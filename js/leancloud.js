@@ -1,176 +1,192 @@
-(() => {
-  const { leancloud, welcome } = window.AD_CONFIG;
-  let totalVisit = 0;
-  welcome.interval = Math.abs(parseInt(welcome.interval, 10)) || 30;
+/* global CONFIG */
+// eslint-disable-next-line no-console
 
-  function getPsgID(pathname) {
-    if(!pathname) {
-      pathname = window.location.pathname;
-    }
-
-    let names = pathname.split('/');
-    for(let i = names.length - 1; i >= 0; --i) {
-      let name = names[i].trim();
-      if(name.length > 0 && name !== '/' && name !== 'index.html') {
-        return name;
-      }
-    }
-    return '/';
+(function(window, document) {
+  // 查询存储的记录
+  function getRecord(Counter, target) {
+    return new Promise(function(resolve, reject) {
+      Counter('get', '/classes/Counter?where=' + encodeURIComponent(JSON.stringify({ target })))
+        .then(resp => resp.json())
+        .then(({ results, code, error }) => {
+          if (code === 401) {
+            throw error;
+          }
+          if (results && results.length > 0) {
+            var record = results[0];
+            resolve(record);
+          } else {
+            Counter('post', '/classes/Counter', { target, time: 0 })
+              .then(resp => resp.json())
+              .then((record, error) => {
+                if (error) {
+                  throw error;
+                }
+                resolve(record);
+              }).catch(error => {
+                console.error('Failed to create: ', error);
+                reject(error);
+              });
+          }
+        }).catch((error) => {
+          console.error('LeanCloud Counter Error: ', error);
+          reject(error);
+        });
+    });
   }
 
-  function _updateCommentNum() {
-    const infoDOM = document.querySelector('#site-comment-info'),
-      url = getPsgID(),
-      _ts = 1000;
-    let running = false;
-
-    return (ts = _ts) => {
-      if(running) {
-        return;
-      }
-      setTimeout(() => {
-        running = true;
-        let query = new AV.Query('Comment');
-        query.equalTo('url', url);
-        query.count()
-          .then(num => {
-            infoDOM.innerHTML = `共${num}条评论`;
-            running = false;
-          });
-      }, ts);
-    }
+  // 发起自增请求
+  function increment(Counter, incrArr) {
+    return new Promise(function(resolve, reject) {
+      Counter('post', '/batch', {
+        'requests': incrArr
+      }).then((res) => {
+        res = res.json();
+        if (res.error) {
+          throw res.error;
+        }
+        resolve(res);
+      }).catch((error) => {
+        console.error('Failed to save visitor count: ', error);
+        reject(error);
+      });
+    });
   }
 
-  function active() {
-    if(leancloud.comment === false && leancloud.count === false) {
-      return false;
+  // 构建自增请求体
+  function buildIncrement(objectId) {
+    return {
+      'method': 'PUT',
+      'path'  : `/1.1/classes/Counter/${objectId}`,
+      'body'  : {
+        'time': {
+          '__op'  : 'Increment',
+          'amount': 1
+        }
+      }
+    };
+  }
+
+  // 校验是否为有效的 Host
+  function validHost() {
+    if (CONFIG.web_analytics.leancloud.ignore_local) {
+      var hostname = window.location.hostname;
+      if (hostname === 'localhost' || hostname === '127.0.0.1') {
+        return false;
+      }
     }
     return true;
   }
 
-  function init() {
-    try {
-      window.AV.init(leancloud.appid, leancloud.appkey);
-      return true;
-    } catch(error) {
-      return false;
+  // 校验是否为有效的 UV
+  function validUV() {
+    var key = 'LeanCloud_UV_Flag';
+    var flag = localStorage.getItem(key);
+    if (flag) {
+      // 距离标记小于 24 小时则不计为 UV
+      if (new Date().getTime() - parseInt(flag, 10) <= 86400000) {
+        return false;
+      }
+    }
+    localStorage.setItem(key, new Date().getTime().toString());
+    return true;
+  }
+
+  function addCount(Counter) {
+    var enableIncr = CONFIG.web_analytics.enable && !Fluid.ctx.dnt && validHost();
+    var getterArr = [];
+    var incrArr = [];
+
+    // 请求 PV 并自增
+    var pvCtn = document.querySelector('#leancloud-site-pv-container');
+    if (pvCtn) {
+      var pvGetter = getRecord(Counter, 'site-pv').then((record) => {
+        enableIncr && incrArr.push(buildIncrement(record.objectId));
+        var ele = document.querySelector('#leancloud-site-pv');
+        if (ele) {
+          ele.innerText = (record.time || 0) + (enableIncr ? 1 : 0);
+          pvCtn.style.display = 'inline';
+        }
+      });
+      getterArr.push(pvGetter);
+    }
+
+    // 请求 UV 并自增
+    var uvCtn = document.querySelector('#leancloud-site-uv-container');
+    if (uvCtn) {
+      var uvGetter = getRecord(Counter, 'site-uv').then((record) => {
+        var incrUV = validUV() && enableIncr;
+        incrUV && incrArr.push(buildIncrement(record.objectId));
+        var ele = document.querySelector('#leancloud-site-uv');
+        if (ele) {
+          ele.innerText = (record.time || 0) + (incrUV ? 1 : 0);
+          uvCtn.style.display = 'inline';
+        }
+      });
+      getterArr.push(uvGetter);
+    }
+
+    // 如果有页面浏览数节点，则请求浏览数并自增
+    var viewCtn = document.querySelector('#leancloud-page-views-container');
+    if (viewCtn) {
+      var path = eval(CONFIG.web_analytics.leancloud.path || 'window.location.pathname');
+      var target = decodeURI(path.replace(/\/*(index.html)?$/, '/'));
+      var viewGetter = getRecord(Counter, target).then((record) => {
+        enableIncr && incrArr.push(buildIncrement(record.objectId));
+        var ele = document.querySelector('#leancloud-page-views');
+        if (ele) {
+          ele.innerText = (record.time || 0) + (enableIncr ? 1 : 0);
+          viewCtn.style.display = 'inline';
+        }
+      });
+      getterArr.push(viewGetter);
+    }
+
+    // 如果启动计数自增，批量发起自增请求
+    if (enableIncr) {
+      Promise.all(getterArr).then(() => {
+        incrArr.length > 0 && increment(Counter, incrArr);
+      });
     }
   }
 
-  function log() {
-    let pathname = decodeURIComponent(window.location.pathname);
-    !pathname.endsWith('/') && (pathname = pathname + '/');
+  var appId = CONFIG.web_analytics.leancloud.app_id;
+  var appKey = CONFIG.web_analytics.leancloud.app_key;
+  var serverUrl = CONFIG.web_analytics.leancloud.server_url;
 
-    let Counter = AV.Object.extend('Counter');
-    let counter = new Counter();
-    counter.set('visit_time', new Date().getTime().toString());
-    counter.set('user_agent', window.navigator.userAgent);
-    counter.set('identity_path', pathname);
-    counter.set('more_info', JSON.stringify(window.location));
-
-    let acl = new AV.ACL();
-    acl.setPublicReadAccess(true);
-    acl.setPublicWriteAccess(false);
-
-    counter.setACL(acl);
-    counter.save();
+  if (!appId) {
+    throw new Error('LeanCloud appId is empty');
+  }
+  if (!appKey) {
+    throw new Error('LeanCloud appKey is empty');
   }
 
-  function count() {
-    let query = new AV.Query('Counter');
-    return new Promise(resolve => {
-      query
-        .count()
-        .then(
-          res => resolve(res + 1), 
-          error => {
-            console.log('Error occurs when count in leancloud.js:', error.message);
-            resolve(0);
-          }
-        );
-    });
+  function fetchData(api_server) {
+    var Counter = (method, url, data) => {
+      return fetch(`${api_server}/1.1${url}`, {
+        method,
+        headers: {
+          'X-LC-Id'     : appId,
+          'X-LC-Key'    : appKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(data)
+      });
+    };
+
+    addCount(Counter);
   }
 
-  function showWelcome() {
-    const day = 60 * 60 * 24 * 1000;
-    const layer = document.querySelector('#site-layer'),
-      welcomeDOM = document.querySelector('#site-layer-welcome'),
-      title = document.querySelector('#site-layer-title');
-  
-    let visitTime = parseInt(atob(window.localStorage.getItem('visit_time')), 10),
-      now = Date.now(),
-      offsetDays = 0;
-    
-    window.localStorage.setItem('visit_time', btoa(now.toString()));
-  
-    if(layer.style.display !== 'none' || !totalVisit) {
-      return;
-    }
+  var apiServer = serverUrl || `https://${appId.slice(0, 8).toLowerCase()}.api.lncldglobal.com`;
 
-    offsetDays = Math.ceil((now - visitTime) / day);
-  
-    if(isNaN(offsetDays)) {
-      layer.style.display = 'block';
-      title.innerHTML = '欢迎到来';
-      welcomeDOM.innerHTML = `您是本站的第${totalVisit}位访问者`;
-      welcomeDOM.style.display = 'flex';
-    } else if (offsetDays >= welcome.interval) {
-      layer.style.display = 'block';
-      title.innerHTML = '欢迎回来';
-      welcomeDOM.innerHTML = '您很久没来小站看看啦';
-      welcomeDOM.style.display = 'flex';
-    } else {
-      return;
-    }
-  
-    window.AD_CONFIG.layer.add(() => {
-      title.innerHTML = '';
-      welcomeDOM.innerHTML = '';
-      welcomeDOM.style.display = 'none';
-    });
+  if (apiServer) {
+    fetchData(apiServer);
+  } else {
+    fetch('https://app-router.leancloud.cn/2/route?appId=' + appId)
+      .then(resp => resp.json())
+      .then((data) => {
+        if (data.api_server) {
+          fetchData('https://' + data.api_server);
+        }
+      });
   }
-
-  if(!active()) {
-    return;
-  }
-
-  if(!init()) {
-    return;
-  }
-
-  if(leancloud.count === true) {
-    count().then(res => {
-      document.querySelector('#site-count').innerHTML = res;
-      totalVisit = res;
-      welcome.enable && showWelcome();
-    });
-    log();
-  }
-
-  if(leancloud.comment === true) {
-    const commentDOM = document.querySelector('#site-comment');
-    if(!commentDOM) {
-      return;
-    }
-
-    const updateCommentNum = _updateCommentNum();
-    updateCommentNum(0);
-
-    new Valine({
-      el: '#site-comment',
-      appId: leancloud.appid,
-      appKey: leancloud.appkey,
-      notify: false,
-      verify: false,
-      avatar: "robohash",
-      placeholder: "正确填写邮箱, 才能及时收到回复哦♪(^∇^*)",
-      path: getPsgID()
-    });
-
-    document.querySelector('.vsubmit.vbtn').addEventListener('click', (e) => {
-      e.stopPropagation();
-      e.preventDefault();
-      updateCommentNum(1000);
-    });
-  }
-})();
+})(window, document);
